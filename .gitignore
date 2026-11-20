@@ -1,5 +1,5 @@
 data/raw/*
-!data/raw/.gitkeep
+!data/raw/README.md
 steam_reviews.csv
 .DS_Store
 __pycache__/
