@@ -22,6 +22,7 @@ tqdm.pandas()
 
 print("Loading Steam reviews dataset...")
 
+#file path
 df = pd.read_csv("steam_reviews.csv")
 
 original_review_count = len(df)
