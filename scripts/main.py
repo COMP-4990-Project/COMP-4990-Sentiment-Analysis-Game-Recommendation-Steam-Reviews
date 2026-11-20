@@ -5,6 +5,7 @@ import re
 import nltk
 import os
 import json
+import sys
 import time
 import requests
 
@@ -12,17 +13,51 @@ from tqdm import tqdm
 from nltk.corpus import stopwords
 from fast_langdetect import LangDetectConfig, LangDetector
 
+# ---------- Project folders ----------
+# This script lives in <project>/scripts/, and all data lives in <project>/data/
+SCRIPT_FOLDER = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SCRIPT_FOLDER)
+DATA_FOLDER = os.path.join(PROJECT_ROOT, "data")
+
+# The raw Kaggle file is about 8 GB and is NOT stored in GitHub.
+# Default location: data/raw/steam_reviews.csv, or pass the path when you run:
+#   python3 scripts/main.py /path/to/steam_reviews.csv
+RAW_REVIEWS_PATH = (
+    sys.argv[1] if len(sys.argv) > 1
+    else os.path.join(DATA_FOLDER, "raw", "steam_reviews.csv")
+)
+
 
 
 #initial setup
 
 
-nltk.download("stopwords")
+# Check now, so a missing stopword list fails in seconds, not after 30 minutes
+try:
+    stopwords.words("english")
+except LookupError:
+    try:
+        nltk.download("stopwords")
+        stopwords.words("english")
+    except Exception:
+        raise SystemExit(
+            "\nNLTK stopwords are missing and could not be downloaded. "
+            "Run: python3 -c \"import ssl, nltk; "
+            "ssl._create_default_https_context = ssl._create_unverified_context; "
+            "nltk.download('stopwords')\" and then run this script again."
+        )
+
 tqdm.pandas()
 
 print("Loading Steam reviews dataset...")
 
-df = pd.read_csv("steam_reviews.csv")
+if not os.path.exists(RAW_REVIEWS_PATH):
+    raise SystemExit(
+        f"Could not find the raw dataset at: {RAW_REVIEWS_PATH}\n"
+        "Put steam_reviews.csv in data/raw/ or pass its path as an argument."
+    )
+
+df = pd.read_csv(RAW_REVIEWS_PATH)
 
 original_review_count = len(df)
 
@@ -40,6 +75,7 @@ NUMBER_OF_GAMES = 20
 SAMPLE_SIZE = 1000
 
 ENGLISH_CONFIDENCE = 0.80
+SHORT_REVIEW_WORDS = 5
 
 
 LANGUAGE_BATCH_SIZE = 50000
@@ -51,12 +87,8 @@ LANGUAGE_MAX_INPUT_LENGTH = None
 STEAM_API_URL = "https://store.steampowered.com/api/appdetails/"
 STEAM_REQUEST_DELAY = 1.6
 
-script_folder = os.path.dirname(
-    os.path.abspath(__file__)
-)
-
 STEAM_CACHE_PATH = os.path.join(
-    script_folder,
+    DATA_FOLDER,
     "steam_app_type_cache.json"
 )
 
@@ -69,7 +101,7 @@ print("\nStep 1: Removing unnecessary columns...")
 
 columns_to_remove = [
     column for column in df.columns
-    if column == "Unnamed: 0" or column.startswith("author.")
+    if column in ("Unnamed: 0", "language") or column.startswith("author.")
 ]
 
 print("Columns being removed:", columns_to_remove)
@@ -120,6 +152,28 @@ for column in required_columns:
 
 #Preserve original reviews
 
+
+#keep only the agreed games early (much faster than cleaning all 21 million reviews)
+
+pinned_games_path = os.path.join(DATA_FOLDER, "steam_game_list.csv")
+
+if os.path.exists(pinned_games_path):
+
+    pinned_games = pd.read_csv(pinned_games_path)["game_name"].tolist()
+
+    missing_pinned = [g for g in pinned_games if g not in set(df["app_name"])]
+
+    if missing_pinned:
+
+        raise ValueError(
+            f"These games from steam_game_list.csv are not in the dataset: {missing_pinned}"
+        )
+
+    df = df[df["app_name"].isin(pinned_games)].copy()
+
+    print("\nKeeping only the games in steam_game_list.csv")
+    print("Games kept:", df["app_name"].nunique())
+    print("Reviews remaining:", len(df))
 
 print("\nStep 2: Preserving original reviews...")
 
@@ -265,6 +319,17 @@ def is_english_review(text):
     if not text:
         return False
 
+    letters = [character for character in text if character.isalpha()]
+
+    # Emoji-only or symbol-only reviews have no language to detect
+    if not letters:
+        return False
+
+    # The detector is unreliable on very short text ("good", "fun", "nice"
+    # all get low confidence), so keep short reviews that are plain ASCII
+    if len(text.split()) < SHORT_REVIEW_WORDS:
+        return all(character.isascii() for character in letters)
+
     try:
 
         prediction = language_detector.detect(
@@ -393,7 +458,24 @@ contractions = {
     "i'd": "i would",
     "you'd": "you would",
     "we'd": "we would",
-    "they'd": "they would"
+    "they'd": "they would",
+
+    # Versions written without the apostrophe
+    "dont": "do not",
+    "cant": "cannot",
+    "wont": "will not",
+    "didnt": "did not",
+    "doesnt": "does not",
+    "isnt": "is not",
+    "arent": "are not",
+    "wasnt": "was not",
+    "werent": "were not",
+    "couldnt": "could not",
+    "wouldnt": "would not",
+    "shouldnt": "should not",
+    "havent": "have not",
+    "hasnt": "has not",
+    "hadnt": "had not"
 }
 
 
@@ -423,8 +505,10 @@ df["review_clean"] = df["review_clean"].progress_apply(
 
 print("\nStep 10: Removing punctuation and numbers...")
 
+# Remove apostrophes first (so "dont" stays one word), then turn every other
+# symbol into a space so "game,though" becomes "game though", not "gamethough"
 df["review_clean"] = df["review_clean"].progress_apply(
-    lambda text: re.sub(r"[^a-z\s]", "", text)
+    lambda text: re.sub(r"[^a-z\s]", " ", re.sub(r"['’]", "", text))
 )
 
 
@@ -444,7 +528,14 @@ keep_words = {
     "very",
     "too",
     "nor",
-    "neither"
+    "neither",
+    "more",
+    "most",
+    "only",
+    "than",
+    "few",
+    "against",
+    "off"
 }
 
 stop_words = stop_words - keep_words
@@ -584,9 +675,22 @@ def get_steam_app_type(app_id):
 
             if not app_result or not app_result.get("success"):
 
-                raise RuntimeError(
-                    f"Steam could not verify app ID {app_id}."
-                )
+                # Delisted or region-locked apps: mark as unknown, do not crash
+                steam_app_cache[app_id] = "unknown"
+
+                with open(
+                    STEAM_CACHE_PATH,
+                    "w",
+                    encoding="utf-8"
+                ) as file:
+
+                    json.dump(
+                        steam_app_cache,
+                        file,
+                        indent=4
+                    )
+
+                return "unknown"
 
             app_data = app_result.get("data", {})
 
@@ -778,10 +882,33 @@ if len(eligible_games) < NUMBER_OF_GAMES:
 
 print("\nStep 16: Selecting 20 different games...")
 
-game_list = pd.Series(eligible_games).sample(
-    n=NUMBER_OF_GAMES,
-    random_state=42
-).tolist()
+game_list_path = os.path.join(DATA_FOLDER, "steam_game_list.csv")
+
+if os.path.exists(game_list_path):
+
+    # Use the agreed game list so the same 20 games are used every run
+    game_list = pd.read_csv(game_list_path)["game_name"].tolist()
+
+    missing_games = [g for g in game_list if g not in eligible_games]
+
+    if missing_games:
+
+        raise ValueError(
+            "These games from steam_game_list.csv are not eligible "
+            f"(not found, not a game, or under {MIN_REVIEWS_PER_GAME} "
+            f"reviews): {missing_games}"
+        )
+
+    print("Using the pinned game list from steam_game_list.csv")
+
+else:
+
+    print("No steam_game_list.csv found. Picking 20 random games.")
+
+    game_list = pd.Series(eligible_games).sample(
+        n=NUMBER_OF_GAMES,
+        random_state=42
+    ).tolist()
 
 print("\nSelected games:")
 
@@ -891,8 +1018,8 @@ print(
 print("\nStep 19: Saving files...")
 
 output_folder = os.path.join(
-    script_folder,
-    "cleaned_files"
+    DATA_FOLDER,
+    "cleaned"
 )
 
 os.makedirs(output_folder, exist_ok=True)
