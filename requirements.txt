@@ -1,0 +1,8 @@
+pandas
+numpy
+nltk
+tqdm
+requests
+fast-langdetect
+vaderSentiment
+streamlit

@@ -1,1 +1,4 @@
 *.csv filter=lfs diff=lfs merge=lfs -text
+data/scored/per_game_summary.csv !filter !diff !merge text
+data/steam_game_list.csv !filter !diff !merge text
+data/cleaned/steam_game_list.csv !filter !diff !merge text
